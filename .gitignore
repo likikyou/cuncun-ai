@@ -1,0 +1,23 @@
+# 绝对不能上传的隐私配置
+.env
+config.local.py
+
+# 数据库与个人记忆
+*.db
+*.sqlite
+backups/
+
+# 音频素材（开源版建议让用户自行准备）
+音频数据/
+assets/
+*.opus
+*.mp3
+
+# Python 缓存与环境
+__pycache__/
+.venv/
+venv/
+
+# 日志
+logs/
+*.log

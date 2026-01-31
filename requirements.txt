@@ -1,0 +1,23 @@
+# 基础 Web 框架
+Flask==3.1.2
+python-dotenv==1.2.1
+requests==2.32.5
+Werkzeug==3.1.4
+
+# 飞书 SDK
+lark-oapi==1.5.2
+
+# AI 与 大模型 (DeepSeek 兼容 OpenAI 接口)
+openai==2.14.0
+pydantic==2.12.5
+
+# 向量数据库与长短期记忆
+chromadb==1.4.0
+numpy==2.2.6
+
+# 定时任务与自动备份
+APScheduler==3.11.2
+
+# 生产环境运行服务器
+gunicorn==23.0.0  # Linux 推荐
+waitress==3.0.5   # Windows 推荐
