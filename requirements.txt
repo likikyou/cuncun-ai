@@ -4,20 +4,21 @@ python-dotenv==1.2.1
 requests==2.32.5
 Werkzeug==3.1.4
 
-# 飞书 SDK
-lark-oapi==1.5.2
+# 飞书 SDK (锁定 1.5.3 稳定版)
+lark-oapi==1.5.3
 
 # AI 与 大模型
-openai==2.14.0
-pydantic==2.12.5
+openai>=1.50.0
+pydantic==2.10.0
 
 # 向量数据库与长短期记忆
-chromadb==1.4.0
-numpy>=1.26.0  # 放宽限制，确保支持 Python 3.12
+chromadb>=0.4.0
+numpy>=1.26.0
 
-# 定时任务与自动备份
+# 定时任务 (注意：你的代码使用了 schedule，请务必保留)
+schedule==1.2.2
 APScheduler==3.11.2
 
 # 生产环境运行服务器
 gunicorn==23.0.0 
-waitress>=3.0.0  
+waitress>=3.0.0
