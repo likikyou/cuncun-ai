@@ -2,8 +2,14 @@ import sqlite3
 import os
 from datetime import datetime
 
-# --- 核心路径：确保与主程序访问同一个文件 ---
-DB_PATH = "/root/likikyou9/AI_banlu_cuncun_memory.db"
+# 获取当前文件所在的文件夹路径
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 动态组合路径：无论在 Windows、Linux 还是 root 目录下运行，都能准确找到 data 文件夹
+DB_PATH = os.path.join(BASE_DIR, "data", "AI_banlu_cuncun_memory.db")
+
+# 确保文件夹存在
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 def get_db_connection():
     """创建一个通用的数据库连接，设置超时时间防止多线程竞争锁"""
