@@ -7,17 +7,17 @@ Werkzeug==3.1.4
 # 飞书 SDK
 lark-oapi==1.5.2
 
-# AI 与 大模型 (DeepSeek 兼容 OpenAI 接口)
+# AI 与 大模型
 openai==2.14.0
 pydantic==2.12.5
 
 # 向量数据库与长短期记忆
 chromadb==1.4.0
-numpy==2.2.6
+numpy>=1.26.0  # 放宽限制，确保支持 Python 3.12
 
 # 定时任务与自动备份
 APScheduler==3.11.2
 
 # 生产环境运行服务器
-gunicorn==23.0.0  # Linux 推荐
-waitress==3.0.5   # Windows 推荐
+gunicorn==23.0.0 
+waitress>=3.0.0  # 修正 AI 幻觉，确保 Windows/WSL 兼容
