@@ -2,16 +2,10 @@ import json
 import threading
 import schedule
 import time
-import os
-import lark_oapi as lark
-from flask import Flask, jsonify
+from flask import Flask, request, jsonify
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from datetime import datetime, timedelta, timezone
-
-# 引入飞书 SDK 的相关模块
-from lark_oapi.client import Client
-from lark_oapi.ws import Client as WSClient
-from lark_oapi.service.im.v1 import P2pChatCreateEvent
 
 from config import Config
 from database_manager import init_db, save_message, get_recent_history
@@ -21,54 +15,60 @@ from cuncun_utils import (
     check_health, backup_database_task
 )
 
-# ----------------------------------------------------------------
-# 全局配置与初始化
-# ----------------------------------------------------------------
 app = Flask(__name__)
 executor = ThreadPoolExecutor(max_workers=3)
+processed_ids = deque(maxlen=1000)
 
-# ----------------------------------------------------------------
-# 核心业务逻辑 (AI 大脑)
-# ----------------------------------------------------------------
-
+# --- Phase 1.3: 错误告警机制 ---
 def send_error_alert(error_msg):
     """当系统逻辑崩溃时，第一时间给 likikyou 发送飞书提醒"""
     alert_text = f"⚠️ 【存存系统告警】\n时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n内容：{error_msg}"
+    # 这里的 ADMIN_OPEN_ID 请在 .env 或 config.py 中配置为你自己的 open_id
     admin_id = getattr(Config, 'ADMIN_OPEN_ID', None)
     if admin_id:
         send_feishu(admin_id, "text", {"text": alert_text})
         logger.info("已发送错误告警至管理员")
 
+# Prompt 提示词构建逻辑
 def build_prompt(user_text):
     """构建带实时时间戳的提示词"""
+    # 强制北京时间 (UTC+8)
     now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+    
     try:
         with open(Config.PROMPT_PATH, "r", encoding="utf-8") as f:
             base = f.read().strip()
     except Exception as e:
         logger.warning(f"读取提示词失败: {e}")
         base = "我是存存，也可以叫我存宝。一个顶尖化妆师。"
+        
     return f"{base}\n当前时间: {now}"
 
-def process_message_task(open_id, user_text):
-    """
-    具体的任务执行函数，放入线程池运行
-    """
+def core_logic(data):
+    """核心处理逻辑，集成异常告警"""
+    open_id = "未知"
     try:
+        event = data.get("event", {})
+        if event.get("message", {}).get("message_type") != "text": return
+        
+        user_text = json.loads(event["message"]["content"])["text"].strip()
+        open_id = event["sender"]["sender_id"]["open_id"]
+        
         # 使用结构化日志记录输入
-        logger.info(f"📩 收到用户消息 (长连接)", extra={"user_text": user_text, "open_id": open_id})
+        logger.info(f"📩 收到用户消息", extra={"user_text": user_text, "open_id": open_id})
         save_message(open_id, "user", user_text)
         
         prompt = build_prompt(user_text)
         history = get_recent_history(open_id, limit=6)
         
+        # 记录调取历史的行为，取代 print
         logger.info(f"正在调取历史记忆", extra={"history_count": len(history)})
         
         reply = call_ai(prompt, user_text, history)
         
         # 长文本预热回复
         if len(user_text) > 50:
-            notice = "喔唷，今天写了这么多心里话呀，我正在认真读呢，稍微等我一下喔... ☕️"
+            notice = "喔唷，likikyou 今天写了这么多心里话呀，我正在认真读呢，稍微等我一下喔... ☕️"
             send_feishu(open_id, "text", {"text": notice})
         
         save_message(open_id, "assistant", reply)
@@ -87,98 +87,77 @@ def process_message_task(open_id, user_text):
     except Exception as e:
         error_info = f"Core Logic Error: {str(e)}"
         logger.error(error_info, exc_info=True)
+        # 触发告警，确保 likikyou 能收到推送
         send_error_alert(error_info)
 
-# ----------------------------------------------------------------
-# 飞书 SDK 长连接处理器
-# ----------------------------------------------------------------
+@app.route("/", methods=["POST"])
+def entry_point():
+    # 1. 🛡️ 安全第一：先校验签名（Security）
+    from cuncun_utils import verify_signature, AESCipher 
+    if not verify_signature(request.headers, request.data):
+        logger.warning("🚫 收到非法请求，签名校验失败")
+        return jsonify({"code": 403, "msg": "invalid signature"}), 403
 
-def do_p2p_chat_create(data: P2pChatCreateEvent, option: lark.EventHandlerOption = None):
-    """
-    飞书 SDK 的回调函数。当收到私聊消息时，SDK 会自动调用这个函数。
-    """
-    # 1. 解析 SDK 对象中的数据
-    try:
-        event = data.event
-        sender_id = event.sender.sender_id.open_id
-        content_json = event.message.content
-        msg_type = event.message.message_type
-        
-        # 2. 这里的 content 是一个 JSON 字符串，需要解析
-        content_dict = json.loads(content_json)
-        
-        if msg_type != "text":
-            logger.info("收到非文本消息，跳过处理")
-            return
-            
-        user_text = content_dict.get("text", "").strip()
-        
-        # 3. 扔进线程池异步处理，不阻塞 SDK 的长连接心跳
-        executor.submit(process_message_task, sender_id, user_text)
-        
-    except Exception as e:
-        logger.error(f"SDK 数据解析失败: {e}", exc_info=True)
+    # 获取原始 JSON 数据
+    data = request.json
+    
+    # 2. 🔓 开启“拆箱”逻辑：如果消息被加密，则进行解密
+    if data and "encrypt" in data:
+        try:
+            # 使用配置中的 ENCRYPT_KEY 进行解密
+            cipher = AESCipher(Config.FEISHU_ENCRYPT_KEY)
+            data = cipher.decrypt(data["encrypt"])
+            # logger.info("🔓 消息解密成功")
+        except Exception as e:
+            logger.error(f"❌ 消息解密失败: {e}")
+            return jsonify({"code": 500, "msg": "decryption failed"}), 500
 
-# ----------------------------------------------------------------
-# 辅助服务 (健康检查 & 定时任务)
-# ----------------------------------------------------------------
+    # 3. 处理业务逻辑 (此时 data 已经是明文 JSON)
+    
+    # 处理飞书的 URL 验证 (Challenge)
+    if data and ("challenge" in data or data.get("type") == "url_verification"):
+        return jsonify({"challenge": data.get("challenge")})
+    
+    # 消息排重 (使用解密后的 header)
+    eid = data.get("header", {}).get("event_id")
+    if not eid or eid in processed_ids: 
+        return jsonify({})
+    processed_ids.append(eid)
+    
+    
+    # 4. 🚀 异步执行核心对话逻辑
+    executor.submit(core_logic, data)
+    
+    # 注意：这里返回必须带 {}，代表成功接收
+    return jsonify({})
+# ------------------------------------------
 
 @app.route("/health", methods=["GET"])
 def health_check_endpoint():
-    """保留健康检查接口，方便本地查看"""
+    """健康检查接口"""
     status = check_health()
     code = 200 if status["status"] == "healthy" else 503
     return jsonify(status), code
 
+# --- Phase 1.2: 定时任务执行器 ---
 def run_scheduler():
+    # 1. 每天凌晨 2 点备份
     schedule.every().day.at("02:00").do(backup_database_task)
+    
+    # 2. 每小时执行一次内部健康自检并记录日志
     schedule.every().hour.do(check_health)
+    
     logger.info("⏰ 定时任务调度器已启动")
     while True:
         schedule.run_pending()
         time.sleep(60)
 
-def run_flask_app():
-    """在独立线程中运行 Flask，仅用于 Health Check"""
-    port = getattr(Config, 'SERVER_PORT', getattr(Config, 'PORT', 8081))
-    # use_reloader=False 防止在线程中二次启动
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
-# ----------------------------------------------------------------
-# 主程序入口
-# ----------------------------------------------------------------
-
 if __name__ == "__main__":
     init_db()
     
-    # 1. 启动定时任务 (后台线程)
+    # 启动后台调度线程
     threading.Thread(target=run_scheduler, daemon=True).start()
     
-    # 2. 启动 Flask 健康检查服务 (后台线程)
-    # 这样你依然可以访问 http://localhost:8081/health
-    threading.Thread(target=run_flask_app, daemon=True).start()
-    
-    # 3. 启动飞书长连接 (主进程阻塞运行)
-    app_id = getattr(Config, 'FEISHU_APP_ID', os.getenv("FEISHU_APP_ID"))
-    app_secret = getattr(Config, 'FEISHU_APP_SECRET', os.getenv("FEISHU_APP_SECRET"))
-    
-    if not app_id or not app_secret:
-        logger.error("❌ 启动失败：未配置 FEISHU_APP_ID 或 FEISHU_APP_SECRET")
-        exit(1)
-
-    # 注册事件处理器
-    event_handler = lark.EventDispatcherHandler.builder("", "") \
-        .register_p2p_chat_create_event(do_p2p_chat_create) \
-        .build()
-
-    # 创建并启动长连接客户端
-    logger.info("🔗 正在建立飞书长连接 (WebSocket)...")
-    ws_client = WSClient.builder(app_id, app_secret) \
-        .event_handler(event_handler) \
-        .build()
-
-    try:
-        # start() 是阻塞的，会一直运行直到按 Ctrl+C
-        ws_client.start()
-    except Exception as e:
-        logger.error(f"❌ 长连接断开或启动失败: {e}")
+    port = getattr(Config, 'SERVER_PORT', getattr(Config, 'PORT', 8081))
+    logger.info(f"🚀 存存 V2.2 启动成功: {port} (带告警与定时运维)")
+    app.run(host='0.0.0.0', port=port, debug=False)
