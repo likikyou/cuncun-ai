@@ -7,6 +7,8 @@ Werkzeug==3.1.4
 # 飞书 SDK (锁定 1.5.3 稳定版)
 lark-oapi==1.5.3
 
+
+
 # AI 与 大模型
 openai>=1.50.0
 pydantic==2.10.0
